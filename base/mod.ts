@@ -94,6 +94,12 @@ export function getNodeInfo(options: {
                 runtimeHandlers: [],
                 volumesAttached: [],
                 volumesInUse: [],
+            },
+            spec: {
+                podCIDRs: [],
+                taints: [],
+                unschedulable: false,
+                providerID: options.hostname
             }
         }
     } as NodeGroupTemplateNodeInfoResponse;
@@ -184,14 +190,16 @@ setInterval(() => {
     const job = jobQueue.shift();
     if (!job) return;
 
+    console.log("[jobQueue] Starting jobQueue processing...");
     jobQueueProcessing = true;
 
     job()
         .catch(err => {
-            console.error("Error in jobQueue:", err);
+            console.error("[jobQueue] Error in jobQueue:", err);
         })
         .finally(() => {
             jobQueueProcessing = false;
+            console.log("[jobQueue] Finished jobQueue processing.");
         });
 }, 500);
 

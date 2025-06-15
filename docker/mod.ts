@@ -2,7 +2,7 @@
 
 import { writeFileSync } from "node:fs";
 import { $ } from "zx";
-import { Instance, InstanceStatus, InstanceStatus_InstanceState, NodeGroup } from "../base/externalgrpc.ts";
+import { Instance, InstanceStatus, InstanceStatus_InstanceState, NodeGroup, NodeGroupForNodeResponse } from "../base/externalgrpc.ts";
 import { createCloudProviderServer, getNodeInfo, jobQueue, MethodNotImplementedError, StatusCodes } from "../base/mod.ts";
 const currentNodesGroups: NodeGroup[] = [
     {
@@ -16,6 +16,14 @@ const currentNodesGroups: NodeGroup[] = [
 // this is the state we should persist. Currently we hold it just in memory.
 const instanceStatuses: Record<string, InstanceStatus> = {};
 
+const docker = await $`docker ps --format "{{.Names}}"`.text();
+const dockerNodes = docker.split("\n").filter(item => item.startsWith("tca-docker"));
+for (const node of dockerNodes) {
+    instanceStatuses[ node ] = {
+        errorInfo: undefined,
+        instanceState: InstanceStatus_InstanceState.instanceRunning
+    };
+}
 async function deployNode(hostname: string) {
     try {
         const resolvedIP = (await $`docker inspect ${hostname} --format='{{.NetworkSettings.IPAddress}}'`.text()).trim();
@@ -33,23 +41,35 @@ nodes:
       machine:
         kubelet:
             extraArgs:
-                provider-id: "externalgrpc://${hostname}"
+                provider-id: "${hostname}"
 `.trim();
         writeFileSync("talconfig.yaml", talconfig);
 
+        console.log("[deploy] Talos config generated.");
         await $`talhelper genconfig`;
 
-        await $`until nc -vzw 2 ${resolvedIP} 50000; do sleep 2; done`;
+        let successfully = false;
+        while (!successfully) {
+            try {
+                await $`talosctl get version -n ${resolvedIP} -e ${resolvedIP} --insecure`.text();
+                successfully = true;
+            } catch {
+                //
+            }
+        }
+
+        console.log("[deploy] Talos node is reachable, applying configuration...");
 
         await $`talhelper gencommand apply --extra-flags --insecure  | bash`;
 
-        console.log("Node setup successfully:", hostname);
+        console.log("[deploy] Node setup successfully:", hostname);
 
         instanceStatuses[ hostname ] = {
             errorInfo: undefined,
             instanceState: InstanceStatus_InstanceState.instanceRunning
         };
     } catch (error) {
+        console.error("Error while deploying node:", error);
         instanceStatuses[ hostname ] = {
             errorInfo: error instanceof Error ? {
                 errorCode: "DeploymentError",
@@ -82,8 +102,18 @@ nodes:
 
         await $`talhelper genconfig`;
         await $`talosctl reset --talosconfig ./clusterconfig/talosconfig -e 10.5.0.2 --wait=false`;
-
-        delete instanceStatuses[ hostname ];
+        console.log("[remove] Talos node is being removed:", hostname);
+        while (true) {
+            try {
+                await $`docker inspect ${hostname} --format='{{.State.Status}}'`;
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                console.log("[remove] Waiting for node to be removed:", hostname);
+            } catch {
+                console.log("Node deleted successfully:", hostname);
+                delete instanceStatuses[ hostname ];
+                return;
+            }
+        }
     } catch (error) {
         instanceStatuses[ hostname ] = {
             errorInfo: error instanceof Error ? {
@@ -114,12 +144,18 @@ createCloudProviderServer({
         const invalidResponse = {
             type: "response",
             response: {
-                nodeGroup: undefined
-            }
+                nodeGroup: {
+                    id: "",
+                    debug: "",
+                    maxSize: 0,
+                    minSize: 0
+                }
+            } as NodeGroupForNodeResponse
         } as const;
 
         if (!req.node) return invalidResponse;
-        if (!req.node.name.startsWith("tca-docker")) return invalidResponse;
+        if (!req.node.providerID) return invalidResponse;
+        if (!instanceStatuses[ req.node.providerID ]) return invalidResponse;
 
         return {
             type: "response",
@@ -129,6 +165,7 @@ createCloudProviderServer({
         };
     },
     refresh: async () => {
+
         // We should refresh our state here.
         return {
             type: "response",
@@ -189,10 +226,20 @@ createCloudProviderServer({
                     instanceState: InstanceStatus_InstanceState.instanceCreating
                 };
 
-                jobQueue.push(() => deployNode(nodeName));
+                const waitForNode = Promise.withResolvers<void>();
+                jobQueue.push(async () => {
+                    try {
+                        await deployNode(nodeName);
+                        waitForNode.resolve();
+                    } catch (error) {
+                        console.error("Error while deploying node:", error);
+                        waitForNode.reject(error);
+                    }
+                });
+                await waitForNode.promise;
             }
             catch (error) {
-
+                console.error("Error while increasing node group size:", error);
                 return {
                     type: "error",
                     error: error instanceof Error ? {
@@ -223,7 +270,18 @@ createCloudProviderServer({
                     errorInfo: undefined,
                     instanceState: InstanceStatus_InstanceState.instanceDeleting
                 };
-                jobQueue.push(() => removeNode(nodeName));
+
+                const waitForNode = Promise.withResolvers<void>();
+                jobQueue.push(async () => {
+                    try {
+                        await removeNode(nodeName);
+                        waitForNode.resolve();
+                    } catch (error) {
+                        console.error("Error while removing node:", error);
+                        waitForNode.reject(error);
+                    }
+                });
+                await waitForNode.promise;
             }
         }
         return {
@@ -240,19 +298,14 @@ createCloudProviderServer({
         if (req.id !== "tca-docker") {
             return MethodNotImplementedError;
         }
-        const docker = await $`docker ps --format "{{.Names}}"`.text();
-        const dockerNodes = docker.split("\n").filter(item => item.startsWith("tca-docker"));
 
         return {
             type: "response",
             response: {
                 instances: [
-                    ...dockerNodes.map((name): Instance => ({
+                    ...Object.entries(instanceStatuses).map(([ name, status ]): Instance => ({
                         id: name,
-                        status: instanceStatuses[ name ] ?? {
-                            // Currently we assume the node is running, meaning it is currently not being created or deleted.
-                            instanceState: InstanceStatus_InstanceState.instanceRunning
-                        }
+                        status
                     }))
                 ]
             }
@@ -283,7 +336,15 @@ createCloudProviderServer({
         }
         return MethodNotImplementedError;
     },
-    nodeGroupGetOptions: async () => {
+    nodeGroupGetOptions: async (req) => {
+        if (req.id === "tca-docker") {
+            return {
+                type: "response",
+                response: {
+                    nodeGroupAutoscalingOptions: req.defaults
+                }
+            };
+        }
         return MethodNotImplementedError;
     }
 });
