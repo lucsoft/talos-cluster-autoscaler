@@ -1,0 +1,74 @@
+# This is the normal Helm Chart for Cluster Autoscaler
+
+# So its just a:
+# helm repo add autoscaler https://kubernetes.github.io/autoscaler
+# helm install cluster-autoscaler autoscaler/cluster-autoscaler -n kube-system -f values.yaml
+
+cloudProvider: externalgrpc
+
+autoscalingGroups:
+  - name: tca-docker
+    maxSize: 10
+    minSize: 1
+
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+extraObjects:
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: external-grpc-config
+    data:
+      # For local development, this is my network address. This should be the service address when running in a cluster.
+      cloud-config: |-
+        address: "192.168.0.187:8086"
+        key: "/etc/ssl/client-cert/tls.key"
+        cert: "/etc/ssl/client-cert/tls.crt"
+        cacert: "/etc/ssl/client-cert/ca.crt"
+
+  - apiVersion: cert-manager.io/v1
+    kind: Issuer
+    metadata:
+      name: external-grpc-issuer
+    spec:
+      selfSigned: {}
+
+  - apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: external-grpc-ca
+    spec:
+      issuerRef:
+        name: external-grpc-issuer
+        kind: Issuer
+      secretName: external-grpc-ca
+      commonName: external-grpc-ca
+      isCA: true
+      duration: 87600h # 10 years
+      dnsNames:
+        - "cluster-autoscaler-grpc-client"
+      ipAddresses:
+        - "192.168.0.187"
+
+extraVolumes:
+  - name: cloud-config
+    configMap:
+      name: external-grpc-config
+  - name: external-grpc-ca
+    secret:
+      secretName: external-grpc-ca
+
+extraVolumeMounts:
+  - name: cloud-config
+    mountPath: /config
+    readOnly: true
+  - name: external-grpc-ca
+    mountPath: /etc/ssl/client-cert
+    readOnly: true
+
+extraArgs:
+  v: "1"
+  cloud-config: /config/cloud-config
