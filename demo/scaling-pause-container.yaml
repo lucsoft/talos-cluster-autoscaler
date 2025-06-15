@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scaling-test
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scaling-test
+  template:
+    metadata:
+      labels:
+        app: scaling-test
+    spec:
+      containers:
+        - name: scaling-test
+          # just use the pause image
+          image: registry.k8s.io/pause:3.6
