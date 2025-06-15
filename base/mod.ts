@@ -494,10 +494,6 @@ export function startService() {
                             ipAddress: await config.fetchTalosApidIPAddress(nodeName),
                         });
 
-                        const endpointIp = new URL(talhelperConfig.endpoint).hostname;
-
-                        await $`talosctl reset --talosconfig ./clusterconfig/talosconfig -e ${endpointIp} --wait=false`;
-
                         await config.removeNode(nodeName);
 
                         await $`kubectl delete node ${nodeName}`.text();

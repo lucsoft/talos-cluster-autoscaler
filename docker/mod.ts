@@ -2,6 +2,7 @@ import { $ } from "zx";
 import { repeatUntilFailure } from "../base/async-utils.ts";
 import { Instance, InstanceStatus_InstanceState } from "../base/externalgrpc.ts";
 import { registerNodeGroup, startService } from "../base/mod.ts";
+import { getTalhelperConfig } from "../base/talhelper-utils.ts";
 
 registerNodeGroup({
     nodeGroupConfig: {
@@ -52,7 +53,12 @@ registerNodeGroup({
 
     },
     removeNode: async (nodeName: string) => {
-        // We actually don't need to remove the node, we just let it reset.
+        const talhelperConfig = await getTalhelperConfig();
+        const endpointIp = new URL(talhelperConfig.endpoint).hostname;
+
+        // Stop the node by resetting it.
+        await $`talosctl reset --talosconfig ./clusterconfig/talosconfig -e ${endpointIp} --wait=false`;
+
         await repeatUntilFailure(async () => {
             await $`docker inspect ${nodeName} --format='{{.State.Status}}'`.quiet();
             await new Promise(resolve => setTimeout(resolve, 1000));
