@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.5.2",
+    "@grpc/grpc-js": "^1.13.4",
+    "@std/yaml": "npm:@jsr/std__yaml@^1.0.8",
+    "zx": "^8.5.5"
+  }
+}

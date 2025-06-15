@@ -1,7 +1,12 @@
+// deno-lint-ignore-file require-await
 import * as grpc from "@grpc/grpc-js";
 import { ServerStatusResponse } from "@grpc/grpc-js/build/src/server-call.ts";
 import { readFile } from "node:fs/promises";
-import { CloudProviderServer, CloudProviderService, NodeGroupAutoscalingOptionsRequest, NodeGroupAutoscalingOptionsResponse, NodeGroupDecreaseTargetSizeRequest, NodeGroupDecreaseTargetSizeResponse, NodeGroupDeleteNodesRequest, NodeGroupDeleteNodesResponse, NodeGroupForNodeRequest, NodeGroupForNodeResponse, NodeGroupIncreaseSizeRequest, NodeGroupIncreaseSizeResponse, NodeGroupNodesRequest, NodeGroupNodesResponse, NodeGroupsRequest, NodeGroupsResponse, NodeGroupTargetSizeRequest, NodeGroupTargetSizeResponse, NodeGroupTemplateNodeInfoRequest, NodeGroupTemplateNodeInfoResponse, PricingNodePriceRequest, PricingNodePriceResponse, PricingPodPriceRequest, PricingPodPriceResponse, RefreshRequest, RefreshResponse } from "./externalgrpc.ts";
+import { $ } from "zx";
+import { repeatUntilSuccess } from "./async-utils.ts";
+import { CloudProviderServer, CloudProviderService, Instance, InstanceStatus, InstanceStatus_InstanceState, NodeGroup, NodeGroupAutoscalingOptionsRequest, NodeGroupAutoscalingOptionsResponse, NodeGroupDecreaseTargetSizeRequest, NodeGroupDecreaseTargetSizeResponse, NodeGroupDeleteNodesRequest, NodeGroupDeleteNodesResponse, NodeGroupForNodeRequest, NodeGroupForNodeResponse, NodeGroupIncreaseSizeRequest, NodeGroupIncreaseSizeResponse, NodeGroupNodesRequest, NodeGroupNodesResponse, NodeGroupsRequest, NodeGroupsResponse, NodeGroupTargetSizeRequest, NodeGroupTargetSizeResponse, NodeGroupTemplateNodeInfoRequest, NodeGroupTemplateNodeInfoResponse, PricingNodePriceRequest, PricingNodePriceResponse, PricingPodPriceRequest, PricingPodPriceResponse, RefreshRequest, RefreshResponse } from "./externalgrpc.ts";
+import { getTalhelperConfig, overwriteNodesInTalhelperConfig } from "./talhelper-utils.ts";
+import { ActionsForNodeGroup } from "./types.ts";
 
 // Converts to a Promise-based API
 
@@ -190,16 +195,14 @@ setInterval(() => {
     const job = jobQueue.shift();
     if (!job) return;
 
-    console.log("[jobQueue] Starting jobQueue processing...");
     jobQueueProcessing = true;
 
     job()
         .catch(err => {
-            console.error("[jobQueue] Error in jobQueue:", err);
+            console.error("[JOBS] Error in jobQueue:", err);
         })
         .finally(() => {
             jobQueueProcessing = false;
-            console.log("[jobQueue] Finished jobQueue processing.");
         });
 }, 500);
 
@@ -302,4 +305,286 @@ export async function createCloudProviderServer(api: CloudProviderApi) {
             private_key: key
         }
     ], false), (err, port) => err ? console.error(err) : console.log(`Server running at 0.0.0.0:${port}`));
+}
+
+const nodeGroups: ActionsForNodeGroup[] = [];
+
+let cachedInstanceStatus: Record<string, InstanceStatus> = {};
+
+export function registerNodeGroup(nodeGroup: ActionsForNodeGroup) {
+    nodeGroups.push(nodeGroup);
+}
+
+export function startService() {
+    createCloudProviderServer({
+        nodeGroups: async () => {
+            return {
+                type: "response",
+                response: {
+                    nodeGroups: nodeGroups.map((ng): NodeGroup => ({
+                        id: ng.nodeGroupConfig.id,
+                        debug: ng.nodeGroupConfig.id,
+                        minSize: ng.nodeGroupConfig.minSize || 0,
+                        maxSize: ng.nodeGroupConfig.maxSize
+                    }))
+                }
+            };
+        },
+        nodeGroupForNode: async (req) => {
+            const invalidResponse = {
+                type: "response",
+                response: {
+                    nodeGroup: {
+                        id: "",
+                        debug: "",
+                        maxSize: 0,
+                        minSize: 0
+                    }
+                } as NodeGroupForNodeResponse
+            } as const;
+
+            if (!req.node) return invalidResponse;
+            if (!req.node.providerID) return invalidResponse;
+            if (!cachedInstanceStatus[ req.node.providerID ]) return invalidResponse;
+
+            const ng = nodeGroups.find(ng => req.node!.providerID.startsWith("tca-" + ng.nodeGroupConfig.id + "-"));
+
+            return {
+                type: "response",
+                response: {
+                    nodeGroup: ng ? {
+                        id: ng.nodeGroupConfig.id,
+                        debug: ng.nodeGroupConfig.id,
+                        minSize: ng.nodeGroupConfig.minSize || 0,
+                        maxSize: ng.nodeGroupConfig.maxSize
+                    } : invalidResponse.response.nodeGroup
+                }
+            };
+        },
+        refresh: async () => {
+            cachedInstanceStatus = {};
+            for (const nodeGroup of nodeGroups) {
+                for (const instance of await nodeGroup.fetchInstances()) {
+                    cachedInstanceStatus[ instance.id ] = instance.status!;
+                }
+            }
+
+            return {
+                type: "response",
+                response: {
+
+                }
+            };
+        },
+        nodeGroupTargetSize: async (req) => {
+            const config = nodeGroups.find(ng => ng.nodeGroupConfig.id === req.id);
+            if (!config) {
+                return MethodNotImplementedError;
+            }
+            return {
+                type: "response",
+                response: {
+                    targetSize: Object.entries(cachedInstanceStatus)
+                        .filter(([ name ]) => name.startsWith("tca-" + req.id))
+                        .filter(([ _, status ]) => status.instanceState !== InstanceStatus_InstanceState.instanceDeleting).length,
+                }
+            };
+        },
+        nodeGroupIncreaseSize: async (req) => {
+            const config = nodeGroups.find(ng => ng.nodeGroupConfig.id === req.id);
+
+            if (!config) {
+                return MethodNotImplementedError;
+            }
+
+            console.log("[TASK] Increasing size node group (" + req.id + ") by " + req.delta + " nodes...");
+
+
+            for (let i = 0; i < req.delta; i++) {
+                const nodeName = `tca-${req.id}-${crypto.randomUUID().split("-")[ 0 ]}`;
+
+                try {
+                    console.log("[DEPLOY] Allocating new node:", nodeName);
+
+                    try {
+                        await config.allocateNode(nodeName);
+                    } catch (error) {
+                        console.error("[DEPLOY] Error while allocating node:", error);
+                        return {
+                            type: "error",
+                            error: {
+                                code: StatusCodes.RESOURCE_EXHAUSTED,
+                                message: "Failed to allocate node: " + (error instanceof Error ? error.message : "Unknown error")
+                            }
+                        };
+                    }
+
+                    const waitForNode = Promise.withResolvers<void>();
+                    jobQueue.push(async () => {
+                        try {
+                            console.log("[DEPLOY] Deploying node:", nodeName);
+                            const talhelperConfig = await getTalhelperConfig();
+                            const inheritedTalhelperConfig = config.nodeGroupConfig.talhelperNodeConfig || {};
+                            const ipAddress = await config.fetchTalosApidIPAddress(nodeName);
+                            await overwriteNodesInTalhelperConfig(talhelperConfig, {
+                                hostname: nodeName,
+                                ipAddress: ipAddress,
+                                ...inheritedTalhelperConfig
+                            });
+                            console.log("[DEPLOY] Prepared talhelper config for node:", nodeName, "with IP:", ipAddress);
+
+                            await repeatUntilSuccess(async () => {
+                                await $`talosctl get version -n ${ipAddress} -e ${ipAddress} --insecure`.quiet();
+                            });
+
+                            console.log("[DEPLOY] Talos is ready to accept config on node:", nodeName);
+
+                            await $`talhelper gencommand apply --extra-flags --insecure  | bash`;
+
+                            console.log("[DEPLOY] Talos config applied to node:", nodeName);
+
+                            waitForNode.resolve();
+                        } catch (error) {
+                            console.error("Error while deploying node:", error);
+                            waitForNode.reject(error);
+                        }
+                    });
+                    await waitForNode.promise;
+                }
+                catch (error) {
+                    console.error("Error while increasing node group size:", error);
+                    return {
+                        type: "error",
+                        error: error instanceof Error ? {
+                            code: StatusCodes.INTERNAL,
+                            ...error
+                        } : {
+                            code: StatusCodes.INTERNAL,
+                            message: "An unknown error occurred while increasing node group size."
+                        }
+                    };
+                }
+            }
+
+            return {
+                type: "response",
+                response: {}
+            };
+        },
+        nodeGroupDeleteNodes: async (req) => {
+            const config = nodeGroups.find(ng => ng.nodeGroupConfig.id === req.id);
+
+            if (!config) {
+                return MethodNotImplementedError;
+            }
+
+            console.log("[UNALLOCATE] Deleting nodes from node group: " + req.nodes.map(node => node.name).join(", ") + " (" + req.id + ")");
+
+            for (const node of req.nodes) {
+                const nodeName = node.name;
+                if (!cachedInstanceStatus[ nodeName ])
+                    continue; // Node is already being processed or does not exist
+
+                const waitForNode = Promise.withResolvers<void>();
+                jobQueue.push(async () => {
+                    try {
+                        const talhelperConfig = await getTalhelperConfig();
+                        await overwriteNodesInTalhelperConfig(talhelperConfig, {
+                            hostname: nodeName,
+                            ipAddress: await config.fetchTalosApidIPAddress(nodeName),
+                        });
+
+                        const endpointIp = new URL(talhelperConfig.endpoint).hostname;
+
+                        await $`talosctl reset --talosconfig ./clusterconfig/talosconfig -e ${endpointIp} --wait=false`;
+
+                        await config.removeNode(nodeName);
+
+                        await $`kubectl delete node ${nodeName}`.text();
+                        waitForNode.resolve();
+                    } catch (error) {
+                        console.error("Error while removing node:", error);
+                        waitForNode.reject(error);
+                    }
+                });
+                await waitForNode.promise;
+            }
+            console.log("[UNALLOCATE] Nodes deleted successfully.");
+            return {
+                type: "response",
+                response: {}
+            };
+        },
+        nodeGroupDecreaseTargetSize: async () => {
+            console.log("🚫 Decreasing target size for node group was called but was never implemented...");
+            return MethodNotImplementedError;
+        },
+        nodeGroupNodes: async (req) => {
+            const config = nodeGroups.find(ng => ng.nodeGroupConfig.id === req.id);
+
+            if (!config) {
+                return MethodNotImplementedError;
+            }
+
+            return {
+                type: "response",
+                response: {
+                    instances: [
+                        ...Object.entries(cachedInstanceStatus)
+                            .filter(([ name ]) => name.startsWith("tca-" + req.id))
+                            .map(([ name, status ]): Instance => ({
+                                id: name,
+                                status
+                            }))
+                    ]
+                }
+            };
+        },
+
+        nodeGroupTemplateNodeInfo: async (req) => {
+            const config = nodeGroups.find(ng => ng.nodeGroupConfig.id === req.id);
+            if (config) {
+                return {
+                    type: "response",
+                    response: getNodeInfo({
+                        hostname: `tca-${config.nodeGroupConfig.id}-${crypto.randomUUID().split("-")[ 0 ]}`,
+                        cpu: config.nodeGroupConfig.template.cpu,
+                        memory: config.nodeGroupConfig.template.memory,
+                        ephemeralStorage: config.nodeGroupConfig.template.ephemeralStorage,
+                        pods: config.nodeGroupConfig.template.pods || "110",
+                        labels: config.nodeGroupConfig.template.labels || {}
+                    })
+                };
+            }
+
+            console.warn("Node group not found for templateNodeInfo:", req.id);
+
+            return MethodNotImplementedError;
+        },
+
+        nodeGroupGetOptions: async (req) => {
+            const config = nodeGroups.find(ng => ng.nodeGroupConfig.id === req.id);
+
+            if (config) {
+                return {
+                    type: "response",
+                    response: {
+                        nodeGroupAutoscalingOptions: req.defaults
+                    }
+                };
+            }
+
+            console.warn("Node group not found for getOptions:", req.id);
+
+            return MethodNotImplementedError;
+        },
+
+        // Maybe if somebody wants to implement this:
+        pricingNodePrice: async () => {
+            return MethodNotImplementedError;
+        },
+        pricingPodPrice: async () => {
+            return MethodNotImplementedError;
+        },
+    });
 }

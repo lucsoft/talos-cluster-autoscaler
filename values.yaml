@@ -7,7 +7,7 @@
 cloudProvider: externalgrpc
 
 autoscalingGroups:
-  - name: tca-docker
+  - name: docker
     maxSize: 10
     minSize: 1
 
@@ -28,6 +28,7 @@ extraObjects:
         key: "/etc/ssl/client-cert/tls.key"
         cert: "/etc/ssl/client-cert/tls.crt"
         cacert: "/etc/ssl/client-cert/ca.crt"
+        grpc_timeout: "60s"
 
   - apiVersion: cert-manager.io/v1
     kind: Issuer
@@ -72,3 +73,7 @@ extraVolumeMounts:
 extraArgs:
   v: "1"
   cloud-config: /config/cloud-config
+  scale-down-unneeded-time: 10s
+  scale-down-delay-after-add: 10s
+  scale-down-unready-time: 10s
+  node-deletion-delay-timeout: 10s
