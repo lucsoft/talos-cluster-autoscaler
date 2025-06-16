@@ -1,7 +1,7 @@
 import { $ } from "zx";
 import { repeatUntilFailure } from "../base/async-utils.ts";
 import { Instance, InstanceStatus_InstanceState } from "../base/externalgrpc.ts";
-import { registerNodeGroup, startService } from "../base/mod.ts";
+import { registerNodeGroup } from "../base/mod.ts";
 import { getTalhelperConfig } from "../base/talhelper-utils.ts";
 
 registerNodeGroup({
@@ -57,7 +57,7 @@ registerNodeGroup({
         const endpointIp = new URL(talhelperConfig.endpoint).hostname;
 
         // Stop the node by resetting it.
-        await $`talosctl reset --talosconfig ./clusterconfig/talosconfig -e ${endpointIp} --wait=false`;
+        await $`talosctl reset --talosconfig ./clusterconfig/talosconfig -e ${endpointIp} --wait=false`.quiet();
 
         await repeatUntilFailure(async () => {
             await $`docker inspect ${nodeName} --format='{{.State.Status}}'`.quiet();
@@ -65,5 +65,3 @@ registerNodeGroup({
         });
     }
 });
-
-startService();

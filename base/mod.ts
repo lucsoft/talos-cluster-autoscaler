@@ -304,18 +304,31 @@ export async function createCloudProviderServer(api: CloudProviderApi) {
             cert_chain: crt,
             private_key: key
         }
-    ], false), (err, port) => err ? console.error(err) : console.log(`Server running at 0.0.0.0:${port}`));
+    ], false), (err, port) => err ? console.error(err) : console.log(`[GRPC] Server running at 0.0.0.0:${port}`));
 }
 
 const nodeGroups: ActionsForNodeGroup[] = [];
-
+const cacheReloader: (() => Promise<void>)[] = [];
 let cachedInstanceStatus: Record<string, InstanceStatus> = {};
 
 export function registerNodeGroup(nodeGroup: ActionsForNodeGroup) {
+    console.log("[REGISTER] Registering node group:", nodeGroup.nodeGroupConfig.id);
     nodeGroups.push(nodeGroup);
 }
 
-export function startService() {
+export function registerCacheReloader(reloader: () => Promise<void>) {
+    cacheReloader.push(reloader);
+}
+
+export async function startService() {
+    for (const reloader of cacheReloader) {
+        try {
+            await reloader();
+        } catch (error) {
+            console.error("[CACHE RELOADER] Error while reloading cache:", error);
+        }
+    }
+
     createCloudProviderServer({
         nodeGroups: async () => {
             return {
@@ -363,6 +376,13 @@ export function startService() {
         },
         refresh: async () => {
             cachedInstanceStatus = {};
+            for (const reloader of cacheReloader) {
+                try {
+                    await reloader();
+                } catch (error) {
+                    console.error("[CACHE RELOADER] Error while reloading cache:", error);
+                }
+            }
             for (const nodeGroup of nodeGroups) {
                 for (const instance of await nodeGroup.fetchInstances()) {
                     cachedInstanceStatus[ instance.id ] = instance.status!;

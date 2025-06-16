@@ -2,6 +2,8 @@
   "dependencies": {
     "@bufbuild/protobuf": "^2.5.2",
     "@grpc/grpc-js": "^1.13.4",
+    "@std/collections": "npm:@jsr/std__collections@^1.1.1",
+    "@std/fmt": "npm:@jsr/std__fmt@^1.0.8",
     "@std/yaml": "npm:@jsr/std__yaml@^1.0.8",
     "zx": "^8.5.5"
   }
