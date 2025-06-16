@@ -99,8 +99,8 @@ for (const datacenter of datacenters) {
                 template: {
                     cpu: size.cpu.toString(),
                     memory: size.memory.toString(),
-                    ephemeralStorage: "19GiB", // Default disk size, can be overridden by the user
-                    pods: "110", // Default pods, can be overridden by the user
+                    ephemeralStorage: "19GiB",
+                    pods: "110",
                     labels: {
                         "topology.kubernetes.io/region": datacenter,
                         ...pool ? {
