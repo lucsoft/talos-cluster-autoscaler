@@ -12,6 +12,7 @@ export async function overwriteNodesInTalhelperConfig(config: TalhelperConfig, n
     config.nodes = [
         {
             installDisk: node.installDisk ?? "/dev/sda",
+            ...node,
             patches: [
                 yaml.stringify({
                     machine: {
@@ -24,7 +25,6 @@ export async function overwriteNodesInTalhelperConfig(config: TalhelperConfig, n
                 }),
                 ...(node.patches || [])
             ],
-            ...node,
             hostname: node.hostname,
             ipAddress: node.ipAddress,
         }
