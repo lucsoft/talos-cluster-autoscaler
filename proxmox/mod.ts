@@ -42,46 +42,17 @@ const availabilityForEachSize: Record<NodeSizes, number> = {
 
 registerCacheReloader(async () => {
     const nodes = await fetchNodesForDatacenter();
-
-    availabilityForEachSize.small = sumOf(nodes.map(nodes => {
-        const usableCpu = nodes.capacity.cpu - nodes.allocated.cpu;
-        const usableMemory = nodes.capacity.memory - nodes.allocated.memory;
-
-        return Math.min(
-            Math.floor(usableCpu / templateVMSizes.small.cpu),
-            Math.floor(usableMemory / templateVMSizes.small.memory)
+    for (const [ sizeName, size ] of templateVmSizesEntries) {
+        availabilityForEachSize[ sizeName ] = sumOf(
+            nodes.map(node =>
+                Math.min(
+                    Math.floor(node.free.cpu / size.cpu),
+                    Math.floor(node.free.memory / size.memory)
+                )
+            ),
+            it => it
         );
-    }), it => it);
-
-    availabilityForEachSize.medium = sumOf(nodes.map(nodes => {
-        const usableCpu = nodes.capacity.cpu - nodes.allocated.cpu;
-        const usableMemory = nodes.capacity.memory - nodes.allocated.memory;
-
-        return Math.min(
-            Math.floor(usableCpu / templateVMSizes.medium.cpu),
-            Math.floor(usableMemory / templateVMSizes.medium.memory)
-        );
-    }), it => it);
-
-    availabilityForEachSize.large = sumOf(nodes.map(nodes => {
-        const usableCpu = nodes.capacity.cpu - nodes.allocated.cpu;
-        const usableMemory = nodes.capacity.memory - nodes.allocated.memory;
-
-        return Math.min(
-            Math.floor(usableCpu / templateVMSizes.large.cpu),
-            Math.floor(usableMemory / templateVMSizes.large.memory)
-        );
-    }), it => it);
-
-    availabilityForEachSize.xlarge = sumOf(nodes.map(nodes => {
-        const usableCpu = nodes.capacity.cpu - nodes.allocated.cpu;
-        const usableMemory = nodes.capacity.memory - nodes.allocated.memory;
-
-        return Math.min(
-            Math.floor(usableCpu / templateVMSizes.xlarge.cpu),
-            Math.floor(usableMemory / templateVMSizes.xlarge.memory)
-        );
-    }), it => it);
+    }
 });
 
 for (const datacenter of datacenters) {

@@ -26,6 +26,11 @@ export type CachedNode = {
         memory: number;
     };
 
+    free: {
+        cpu: number;
+        memory: number;
+    };
+
     pools: string[];
 };
 

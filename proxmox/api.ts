@@ -192,6 +192,10 @@ export async function fetchNodes(): Promise<CachedNode[]> {
                 cpu: allocatedCpu,
                 memory: allocatedMemory
             },
+            free: {
+                cpu: node.maxcpu - allocatedCpu,
+                memory: node.maxmem - allocatedMemory
+            },
             pools: storagePools.data.map(pool => pool.storage).filter(pool => ![ "local", "local-lvm" ].includes(pool))
         });
     }
