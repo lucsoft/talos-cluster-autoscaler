@@ -4,7 +4,7 @@ import { ServerStatusResponse } from "@grpc/grpc-js/build/src/server-call.ts";
 import { readFile } from "node:fs/promises";
 import { $ } from "zx";
 import { repeatUntilSuccess } from "./async-utils.ts";
-import { CloudProviderServer, CloudProviderService, Instance, InstanceStatus, InstanceStatus_InstanceState, NodeGroup, NodeGroupAutoscalingOptionsRequest, NodeGroupAutoscalingOptionsResponse, NodeGroupDecreaseTargetSizeRequest, NodeGroupDecreaseTargetSizeResponse, NodeGroupDeleteNodesRequest, NodeGroupDeleteNodesResponse, NodeGroupForNodeRequest, NodeGroupForNodeResponse, NodeGroupIncreaseSizeRequest, NodeGroupIncreaseSizeResponse, NodeGroupNodesRequest, NodeGroupNodesResponse, NodeGroupsRequest, NodeGroupsResponse, NodeGroupTargetSizeRequest, NodeGroupTargetSizeResponse, NodeGroupTemplateNodeInfoRequest, NodeGroupTemplateNodeInfoResponse, PricingNodePriceRequest, PricingNodePriceResponse, PricingPodPriceRequest, PricingPodPriceResponse, RefreshRequest, RefreshResponse } from "./externalgrpc.ts";
+import { CloudProviderServer, CloudProviderService, Instance, InstanceStatus_InstanceState, NodeGroup, NodeGroupAutoscalingOptionsRequest, NodeGroupAutoscalingOptionsResponse, NodeGroupDecreaseTargetSizeRequest, NodeGroupDecreaseTargetSizeResponse, NodeGroupDeleteNodesRequest, NodeGroupDeleteNodesResponse, NodeGroupForNodeRequest, NodeGroupForNodeResponse, NodeGroupIncreaseSizeRequest, NodeGroupIncreaseSizeResponse, NodeGroupNodesRequest, NodeGroupNodesResponse, NodeGroupsRequest, NodeGroupsResponse, NodeGroupTargetSizeRequest, NodeGroupTargetSizeResponse, NodeGroupTemplateNodeInfoRequest, NodeGroupTemplateNodeInfoResponse, PricingNodePriceRequest, PricingNodePriceResponse, PricingPodPriceRequest, PricingPodPriceResponse, RefreshRequest, RefreshResponse } from "./externalgrpc.ts";
 import { getTalhelperConfig, overwriteNodesInTalhelperConfig } from "./talhelper-utils.ts";
 import { ActionsForNodeGroup } from "./types.ts";
 
@@ -309,7 +309,7 @@ export async function createCloudProviderServer(api: CloudProviderApi) {
 
 const nodeGroups: ActionsForNodeGroup[] = [];
 const cacheReloader: (() => Promise<void>)[] = [];
-let cachedInstanceStatus: Record<string, InstanceStatus> = {};
+let cachedInstances: { instance: Instance, nodeGroupId: string; }[] = [];
 
 export function registerNodeGroup(nodeGroup: ActionsForNodeGroup) {
     console.log("[REGISTER] Registering node group:", nodeGroup.nodeGroupConfig.id);
@@ -358,9 +358,10 @@ export async function startService() {
 
             if (!req.node) return invalidResponse;
             if (!req.node.providerID) return invalidResponse;
-            if (!cachedInstanceStatus[ req.node.providerID ]) return invalidResponse;
+            const instance = cachedInstances.find(obj => obj.instance.id === req.node!.providerID);
+            if (!instance) return invalidResponse;
 
-            const ng = nodeGroups.find(ng => req.node!.providerID.startsWith("tca-" + ng.nodeGroupConfig.id + "-"));
+            const ng = nodeGroups.find(ng => ng.nodeGroupConfig.id === instance.nodeGroupId);
 
             return {
                 type: "response",
@@ -375,7 +376,8 @@ export async function startService() {
             };
         },
         refresh: async () => {
-            cachedInstanceStatus = {};
+            console.time("refresh");
+            cachedInstances = [];
             for (const reloader of cacheReloader) {
                 try {
                     await reloader();
@@ -385,9 +387,13 @@ export async function startService() {
             }
             for (const nodeGroup of nodeGroups) {
                 for (const instance of await nodeGroup.fetchInstances()) {
-                    cachedInstanceStatus[ instance.id ] = instance.status!;
+                    cachedInstances.push({
+                        instance,
+                        nodeGroupId: nodeGroup.nodeGroupConfig.id
+                    });
                 }
             }
+            console.timeEnd("refresh");
 
             return {
                 type: "response",
@@ -404,9 +410,9 @@ export async function startService() {
             return {
                 type: "response",
                 response: {
-                    targetSize: Object.entries(cachedInstanceStatus)
-                        .filter(([ name ]) => name.startsWith("tca-" + req.id))
-                        .filter(([ _, status ]) => status.instanceState !== InstanceStatus_InstanceState.instanceDeleting).length,
+                    targetSize: cachedInstances
+                        .filter(({ nodeGroupId }) => req.id === nodeGroupId)
+                        .filter(({ instance }) => instance.status!.instanceState === InstanceStatus_InstanceState.instanceRunning).length,
                 }
             };
         },
@@ -502,7 +508,7 @@ export async function startService() {
 
             for (const node of req.nodes) {
                 const nodeName = node.name;
-                if (!cachedInstanceStatus[ nodeName ])
+                if (!cachedInstances.find(({ instance }) => instance.id === nodeName))
                     continue; // Node is already being processed or does not exist
 
                 const waitForNode = Promise.withResolvers<void>();
@@ -546,12 +552,9 @@ export async function startService() {
                 type: "response",
                 response: {
                     instances: [
-                        ...Object.entries(cachedInstanceStatus)
-                            .filter(([ name ]) => name.startsWith("tca-" + req.id))
-                            .map(([ name, status ]): Instance => ({
-                                id: name,
-                                status
-                            }))
+                        ...cachedInstances
+                            .filter(({ nodeGroupId }) => nodeGroupId === req.id)
+                            .map(({ instance }) => instance)
                     ]
                 }
             };

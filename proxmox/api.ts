@@ -1,5 +1,5 @@
 import { sumOf } from "@std/collections";
-import { CachedNode, NodeIPFetchingStrategy, PVEInstance, PVENode, PVEResponse, PVEStorageContent, PVEStoragePool } from "./types.ts";
+import { CachedNode, NodeAllocationStrategy, NodeIPFetchingStrategy, NodeSize, PVEInstance, PVENode, PVEResponse, PVEStorageContent, PVEStoragePool } from "./types.ts";
 
 const apiEndpoint = "https://192.168.0.2:8006";
 const token = "103dbed5-4953-47ec-a26a-0897d899bc9c";
@@ -7,18 +7,85 @@ const user = "talos-autoscaler@pve";
 const tokenId = "tas";
 const pveApiToken = `PVEAPIToken=${user}!${tokenId}=${token}`;
 const talosISO = "https://factory.talos.dev/image/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515/v1.10.4/metal-amd64.iso";
-const nodeIPFetchingStrategy = NodeIPFetchingStrategy.QemuGuestAgentSingleIPv4;
+const nodeIPFetchingStrategy: NodeIPFetchingStrategy = NodeIPFetchingStrategy.QemuGuestAgentSingleIPv4;
+const nodeAllocationStrategy: NodeAllocationStrategy = NodeAllocationStrategy.MostFree;
+const isoFileName = "metal-amd64.iso";
+const defaultCPU = 'host';
 
 const denylistForHardwareAddresses = [
     "00:00:00:00:00:00" // This is a common placeholder for unconfigured interfaces
 ];
 
-export async function getIpFromNode(hostname: string): Promise<string> {
-    if (nodeIPFetchingStrategy !== NodeIPFetchingStrategy.QemuGuestAgentSingleIPv4) {
-        console.warn(`Node IP fetching strategy ${nodeIPFetchingStrategy} is not supported.`);
-        throw new Error(`Unsupported node IP fetching strategy: ${nodeIPFetchingStrategy}`);
+export function findPerfectNode(nodes: CachedNode[], hostname: string, size: NodeSize, pool?: string): string {
+
+    const possibleNodes = nodes
+        .filter(node => node.free.cpu >= size.cpu && node.free.memory >= size.memory)
+        .filter(node => pool ? node.pools.includes(pool) : true);
+
+    if (nodeAllocationStrategy === NodeAllocationStrategy.MostFree) {
+        possibleNodes.sort((a, b) => (b.free.cpu + b.free.memory) - (a.free.cpu + a.free.memory));
     }
 
+    if (nodeAllocationStrategy === NodeAllocationStrategy.LeastFree) {
+        possibleNodes.sort((a, b) => (a.free.cpu + a.free.memory) - (b.free.cpu + b.free.memory));
+    }
+
+    if (possibleNodes.length === 0) {
+        throw new Error(`No suitable node found for hostname ${hostname} with size ${JSON.stringify(size)}.`);
+    }
+
+    return possibleNodes[ 0 ].node;
+}
+
+/**
+ * Proxmox doesn't allow to create VMs in an atomic way, so we have to generate a random VMID.
+ * Future code should check if the VMID is already in use and retry if it is.
+ */
+export function randomVMID() {
+    return Math.floor(Math.random() * (1_000_000 - 100)) + 100;
+}
+
+export async function createVM(hostname: string, size: NodeSize, node: string, nodeGroupId: string) {
+    await fetch(`${apiEndpoint}/api2/json/nodes/${node}/qemu`, {
+        method: "POST",
+        headers: {
+            "Authorization": pveApiToken,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            vmid: randomVMID(),
+            name: hostname,
+            ostype: "l26",
+            agent: '1',
+            cores: size.cpu,
+            cpu: defaultCPU,
+            memory: Math.floor(size.memory / 1024), // Convert from bytes to MiB
+            start: true,
+            storage: "local-lvm",
+            tags: nodeGroupId,
+            net0: 'virtio,bridge=vmbr0,firewall=1',
+            virtio0: 'local-lvm:20,iothread=on',
+            sata0: `local:iso/${isoFileName},media=cdrom`,
+        })
+    }).then(response => response.json()).then(console.log);
+}
+
+export async function deleteVM(node: string, vmid: number) {
+    await fetch(`${apiEndpoint}/api2/json/nodes/${node}/qemu/${vmid}`, {
+        method: "DELETE",
+        headers: {
+            "Authorization": pveApiToken,
+            "Content-Type": "application/json"
+        }
+    }).then(response => {
+        if (!response.ok) {
+            throw new Error(`Failed to delete VM ${vmid} on node ${node}: ${response.statusText}`);
+        }
+        return response.json();
+    });
+}
+
+export async function getVMsByNodeGroupId(nodeGroupId: string): Promise<PVEInstance[]> {
     const nodes = await fetch(apiEndpoint + "/api2/json/nodes", {
         method: "GET",
         headers: {
@@ -28,6 +95,40 @@ export async function getIpFromNode(hostname: string): Promise<string> {
     })
         .then<PVEResponse<PVENode[]>>(response => response.json());
 
+    const instances: PVEInstance[] = [];
+
+    for (const node of nodes.data) {
+        const vms = await fetch(`${apiEndpoint}/api2/json/nodes/${node.node}/qemu`, {
+            method: "GET",
+            headers: {
+                "Authorization": pveApiToken,
+                "Content-Type": "application/json"
+            }
+        }).then<PVEResponse<PVEInstance[]>>(response => response.json());
+
+        for (const vm of vms.data) {
+            if (vm.status !== "running") {
+                continue;
+            }
+            if (!vm.tags || vm.tags !== nodeGroupId) {
+                continue;
+            }
+            instances.push(vm);
+        }
+    }
+
+    return instances;
+}
+
+export async function getVM(hostname: string): Promise<{ vm: PVEInstance, node: PVENode; }> {
+    const nodes = await fetch(apiEndpoint + "/api2/json/nodes", {
+        method: "GET",
+        headers: {
+            "Authorization": pveApiToken,
+            "Content-Type": "application/json"
+        }
+    })
+        .then<PVEResponse<PVENode[]>>(response => response.json());
     for (const node of nodes.data) {
         const vms = await fetch(`${apiEndpoint}/api2/json/nodes/${node.node}/qemu`, {
             method: "GET",
@@ -44,44 +145,54 @@ export async function getIpFromNode(hostname: string): Promise<string> {
             if (vm.name !== hostname) {
                 continue;
             }
-            const qemuNetworkInterfaces = await fetch(`${apiEndpoint}/api2/json/nodes/${node.node}/qemu/${vm.vmid}/agent/network-get-interfaces`, {
-                method: "GET",
-                headers: {
-                    "Authorization": pveApiToken,
-                    "Content-Type": "application/json"
-                }
-            }).then<PVEResponse<{ result: { name: string; 'ip-addresses': { "ip-address-type": "ipv4", prefix: number, "ip-address": string; }[]; 'hardware-address': string; }[]; }>>(response => response.json());
-
-            const filteredHardwareAddress = qemuNetworkInterfaces.data.result.filter(iface => !denylistForHardwareAddresses.includes(iface[ 'hardware-address' ]));
-
-            const filteredWithIps = filteredHardwareAddress.filter(iface => iface[ 'ip-addresses' ] && iface[ 'ip-addresses' ].length > 0);
-
-            if (filteredWithIps.length === 0) {
-                console.warn(`No valid network interfaces found for VM ${vm.name} (${vm.vmid}) on node ${node.node}.`);
-                continue;
-            }
-
-            if (filteredWithIps.length > 1) {
-                console.warn(`Multiple valid network interfaces found for VM ${vm.name} (${vm.vmid}) on node ${node.node}. Currently single interface is supported.`);
-                continue;
-            }
-
-            const ipv4Address = filteredWithIps[ 0 ][ "ip-addresses" ].filter(ip => ip[ "ip-address-type" ] === "ipv4");
-
-            if (ipv4Address.length === 0) {
-                console.warn(`No valid IPv4 address found for VM ${vm.name} (${vm.vmid}) on node ${node.node}.`);
-                continue;
-            }
-
-            if (ipv4Address.length > 1) {
-                console.warn(`Multiple valid IPv4 addresses found for VM ${vm.name} (${vm.vmid}) on node ${node.node}. Currently single IPv4 address is supported.`);
-                continue;
-            }
-
-            return ipv4Address[ 0 ][ "ip-address" ];
+            return {
+                node,
+                vm
+            };
         }
     }
-    throw new Error(`Node with hostname ${hostname} not found or does not have a valid IPv4 address.`);
+    throw new Error(`VM with hostname ${hostname} not found.`);
+}
+
+export async function getIpFromNode(hostname: string): Promise<string> {
+    if (nodeIPFetchingStrategy !== NodeIPFetchingStrategy.QemuGuestAgentSingleIPv4) {
+        console.warn(`Node IP fetching strategy ${nodeIPFetchingStrategy} is not supported.`);
+        throw new Error(`Unsupported node IP fetching strategy: ${nodeIPFetchingStrategy}`);
+    }
+
+    const { node, vm } = await getVM(hostname);
+
+    const qemuNetworkInterfaces = await fetch(`${apiEndpoint}/api2/json/nodes/${node.node}/qemu/${vm.vmid}/agent/network-get-interfaces`, {
+        method: "GET",
+        headers: {
+            "Authorization": pveApiToken,
+            "Content-Type": "application/json"
+        }
+    }).then<PVEResponse<{ result: { name: string; 'ip-addresses': { "ip-address-type": "ipv4", prefix: number, "ip-address": string; }[]; 'hardware-address': string; }[]; }>>(response => response.json());
+
+    const filteredHardwareAddress = qemuNetworkInterfaces.data.result.filter(iface => !denylistForHardwareAddresses.includes(iface[ 'hardware-address' ]));
+
+    const filteredWithIps = filteredHardwareAddress.filter(iface => iface[ 'ip-addresses' ] && iface[ 'ip-addresses' ].length > 0);
+
+    if (filteredWithIps.length === 0) {
+        throw new Error(`No valid network interfaces found for VM ${vm.name} (${vm.vmid}) on node ${node}.`);
+    }
+
+    if (filteredWithIps.length > 1) {
+        throw new Error(`Multiple valid network interfaces found for VM ${vm.name} (${vm.vmid}) on node ${node.node}. Currently single interface is supported.`);
+    }
+
+    const ipv4Address = filteredWithIps[ 0 ][ "ip-addresses" ].filter(ip => ip[ "ip-address-type" ] === "ipv4");
+
+    if (ipv4Address.length === 0) {
+        throw new Error(`No valid IPv4 address found for VM ${vm.name} (${vm.vmid}) on node ${node.node}.`);
+    }
+
+    if (ipv4Address.length > 1) {
+        throw new Error(`Multiple valid IPv4 addresses found for VM ${vm.name} (${vm.vmid}) on node ${node.node}. Currently single IPv4 address is supported.`);
+    }
+
+    return ipv4Address[ 0 ][ "ip-address" ];
 }
 
 export async function fetchNodes(): Promise<CachedNode[]> {
@@ -139,9 +250,6 @@ export async function fetchNodes(): Promise<CachedNode[]> {
             console.log(`Node ${node.node} does not have the required storage pool "local" with iso content. Invalid node...`);
             continue;
         }
-
-        // Check if the iso file exists
-        const isoFileName = "metal-amd64.iso";
 
         const content = await fetch(`${apiEndpoint}/api2/json/nodes/${node.node}/storage/local/content`, {
             method: "GET",

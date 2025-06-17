@@ -7,7 +7,7 @@ import { getTalhelperConfig } from "../base/talhelper-utils.ts";
 registerNodeGroup({
     nodeGroupConfig: {
         id: "docker",
-        maxSize: 5,
+        maxSize: 3,
         template: {
             // TODO: Use real values
             cpu: "10",

@@ -4,3 +4,6 @@ vendor
 proto
 base/google
 base/k8s.io
+talconfig.yaml
+talsecret.yaml
+clusterconfig

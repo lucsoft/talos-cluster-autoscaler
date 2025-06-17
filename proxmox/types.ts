@@ -2,6 +2,11 @@ export enum NodeIPFetchingStrategy {
     QemuGuestAgentSingleIPv4 = "QemuGuestAgentSingleIPv4",
 }
 
+export enum NodeAllocationStrategy {
+    MostFree = "MostFree",
+    LeastFree = "LeastFree",
+}
+
 export type NodeSizes = 'small' | 'medium' | 'large' | 'xlarge';
 
 export type NodeSize = {

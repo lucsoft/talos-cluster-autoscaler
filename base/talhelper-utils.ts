@@ -11,8 +11,6 @@ export async function getTalhelperConfig(): Promise<TalhelperConfig> {
 export async function overwriteNodesInTalhelperConfig(config: TalhelperConfig, node: TalhelperNodeConfig) {
     config.nodes = [
         {
-            hostname: node.hostname,
-            ipAddress: node.ipAddress,
             installDisk: node.installDisk ?? "/dev/sda",
             patches: [
                 yaml.stringify({
@@ -25,7 +23,10 @@ export async function overwriteNodesInTalhelperConfig(config: TalhelperConfig, n
                     }
                 }),
                 ...(node.patches || [])
-            ]
+            ],
+            ...node,
+            hostname: node.hostname,
+            ipAddress: node.ipAddress,
         }
     ];
 

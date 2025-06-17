@@ -1,14 +1,16 @@
 // deno-lint-ignore-file require-await
 import { sumOf } from "@std/collections";
+import { repeatUntilSuccess } from "../base/async-utils.ts";
+import { Instance, InstanceStatus_InstanceState } from "../base/externalgrpc.ts";
 import { registerCacheReloader, registerNodeGroup } from "../base/mod.ts";
 import { NodeGroupConfig } from "../base/types.ts";
-import { fetchNodes as fetchNodesForDatacenter, getIpFromNode } from "./api.ts";
+import { createVM, deleteVM, fetchNodes as fetchNodesForDatacenter, findPerfectNode, getIpFromNode, getVM, getVMsByNodeGroupId } from "./api.ts";
 import { NodeSize, NodeSizes } from "./types.ts";
 
 // const defaultDiskSize = 20 * 1024 * 1024 * 1024; // 20GiB (do you really need larger disks? use a zfs pool for larger disks lol)
 
 const datacenters: string[] = [
-    "default"
+    "zone1"
 ];
 
 
@@ -31,7 +33,7 @@ const templateVMSizes: Record<NodeSizes, NodeSize> = {
     }
 };
 
-const templateVmSizesEntries = Object.entries(templateVMSizes) as [ NodeSizes, NodeSize ][];
+const templateVmSizesEntries: [ NodeSizes, NodeSize ][] = [ [ "small", templateVMSizes.small ] ]; // Object.entries(templateVMSizes) as [ NodeSizes, NodeSize ][];
 
 const availabilityForEachSize: Record<NodeSizes, number> = {
     "small": 0,
@@ -63,14 +65,17 @@ for (const datacenter of datacenters) {
     for (const pool of [ undefined, ...nodePools ]) {
         for (const [ name, size ] of templateVmSizesEntries) {
             const nodeGroupId = `proxmox-${datacenter}-${name}${pool ? `-${pool}` : ""}`;
-
+            const targetCount = await getVMsByNodeGroupId(nodeGroupId).then(vms => vms.filter(item => item.status === "running").length);
             const config: NodeGroupConfig = {
                 id: nodeGroupId,
-                maxSize: availabilityForEachSize[ name ],
+                maxSize: targetCount + availabilityForEachSize[ name ],
+                talhelperNodeConfig: {
+                    installDisk: "/dev/vda"
+                },
                 template: {
                     cpu: size.cpu.toString(),
                     memory: size.memory.toString(),
-                    ephemeralStorage: "19GiB",
+                    ephemeralStorage: "19Gi",
                     pods: "110",
                     labels: {
                         "topology.kubernetes.io/region": datacenter,
@@ -83,13 +88,30 @@ for (const datacenter of datacenters) {
 
             registerNodeGroup({
                 nodeGroupConfig: config,
-                allocateNode: () => Promise.resolve(),
+                allocateNode: async (hostname) => {
+                    const node = findPerfectNode(nodes, hostname, size, pool);
+                    await createVM(hostname, size, node, nodeGroupId);
+                    await repeatUntilSuccess(async () => {
+                        await getIpFromNode(hostname);
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    });
+                },
                 fetchInstances: async () => {
-                    config.maxSize = availabilityForEachSize[ name ];
-                    return [];
+                    const instances = await getVMsByNodeGroupId(nodeGroupId).then(vms => vms.map((instance): Instance => ({
+                        id: instance.name,
+                        status: {
+                            errorInfo: undefined,
+                            instanceState: instance.status === "running" ? InstanceStatus_InstanceState.instanceRunning : InstanceStatus_InstanceState.unspecified
+                        }
+                    })));
+                    config.maxSize = availabilityForEachSize[ name ] + instances.length;
+                    return instances;
                 },
                 fetchTalosApidIPAddress: (nodeName) => getIpFromNode(nodeName),
-                removeNode: () => Promise.resolve(),
+                removeNode: async (hostname) => {
+                    const { node, vm } = await getVM(hostname);
+                    await deleteVM(node.node, vm.vmid);
+                },
             });
         }
     }

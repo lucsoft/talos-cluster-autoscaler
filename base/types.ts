@@ -27,7 +27,7 @@ export interface NodeGroupConfig {
      * defaults to true
      */
     manuallyNodeResource?: boolean;
-    talhelperNodeConfig?: TalhelperNodeConfig;
+    talhelperNodeConfig?: Partial<TalhelperNodeConfig>;
 }
 
 
