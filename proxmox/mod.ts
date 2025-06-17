@@ -2,7 +2,7 @@
 import { sumOf } from "@std/collections";
 import { registerCacheReloader, registerNodeGroup } from "../base/mod.ts";
 import { NodeGroupConfig } from "../base/types.ts";
-import { fetchNodes as fetchNodesForDatacenter } from "./api.ts";
+import { fetchNodes as fetchNodesForDatacenter, getIpFromNode } from "./api.ts";
 import { NodeSize, NodeSizes } from "./types.ts";
 
 // const defaultDiskSize = 20 * 1024 * 1024 * 1024; // 20GiB (do you really need larger disks? use a zfs pool for larger disks lol)
@@ -117,7 +117,7 @@ for (const datacenter of datacenters) {
                     config.maxSize = availabilityForEachSize[ name ];
                     return [];
                 },
-                fetchTalosApidIPAddress: () => Promise.resolve(""),
+                fetchTalosApidIPAddress: (nodeName) => getIpFromNode(nodeName),
                 removeNode: () => Promise.resolve(),
             });
         }

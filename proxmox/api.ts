@@ -1,5 +1,5 @@
 import { sumOf } from "@std/collections";
-import { CachedNode, PVEInstance, PVENode, PVEResponse, PVEStorageContent, PVEStoragePool } from "./types.ts";
+import { CachedNode, NodeIPFetchingStrategy, PVEInstance, PVENode, PVEResponse, PVEStorageContent, PVEStoragePool } from "./types.ts";
 
 const apiEndpoint = "https://192.168.0.2:8006";
 const token = "103dbed5-4953-47ec-a26a-0897d899bc9c";
@@ -7,6 +7,82 @@ const user = "talos-autoscaler@pve";
 const tokenId = "tas";
 const pveApiToken = `PVEAPIToken=${user}!${tokenId}=${token}`;
 const talosISO = "https://factory.talos.dev/image/ce4c980550dd2ab1b17bbf2b08801c7eb59418eafe8f279833297925d67c7515/v1.10.4/metal-amd64.iso";
+const nodeIPFetchingStrategy = NodeIPFetchingStrategy.QemuGuestAgentSingleIPv4;
+
+const denylistForHardwareAddresses = [
+    "00:00:00:00:00:00" // This is a common placeholder for unconfigured interfaces
+];
+
+export async function getIpFromNode(hostname: string): Promise<string> {
+    if (nodeIPFetchingStrategy !== NodeIPFetchingStrategy.QemuGuestAgentSingleIPv4) {
+        console.warn(`Node IP fetching strategy ${nodeIPFetchingStrategy} is not supported.`);
+        throw new Error(`Unsupported node IP fetching strategy: ${nodeIPFetchingStrategy}`);
+    }
+
+    const nodes = await fetch(apiEndpoint + "/api2/json/nodes", {
+        method: "GET",
+        headers: {
+            "Authorization": pveApiToken,
+            "Content-Type": "application/json"
+        }
+    })
+        .then<PVEResponse<PVENode[]>>(response => response.json());
+
+    for (const node of nodes.data) {
+        const vms = await fetch(`${apiEndpoint}/api2/json/nodes/${node.node}/qemu`, {
+            method: "GET",
+            headers: {
+                "Authorization": pveApiToken,
+                "Content-Type": "application/json"
+            }
+        }).then<PVEResponse<PVEInstance[]>>(response => response.json());
+
+        for (const vm of vms.data) {
+            if (vm.status !== "running") {
+                continue;
+            }
+            if (vm.name !== hostname) {
+                continue;
+            }
+            const qemuNetworkInterfaces = await fetch(`${apiEndpoint}/api2/json/nodes/${node.node}/qemu/${vm.vmid}/agent/network-get-interfaces`, {
+                method: "GET",
+                headers: {
+                    "Authorization": pveApiToken,
+                    "Content-Type": "application/json"
+                }
+            }).then<PVEResponse<{ result: { name: string; 'ip-addresses': { "ip-address-type": "ipv4", prefix: number, "ip-address": string; }[]; 'hardware-address': string; }[]; }>>(response => response.json());
+
+            const filteredHardwareAddress = qemuNetworkInterfaces.data.result.filter(iface => !denylistForHardwareAddresses.includes(iface[ 'hardware-address' ]));
+
+            const filteredWithIps = filteredHardwareAddress.filter(iface => iface[ 'ip-addresses' ] && iface[ 'ip-addresses' ].length > 0);
+
+            if (filteredWithIps.length === 0) {
+                console.warn(`No valid network interfaces found for VM ${vm.name} (${vm.vmid}) on node ${node.node}.`);
+                continue;
+            }
+
+            if (filteredWithIps.length > 1) {
+                console.warn(`Multiple valid network interfaces found for VM ${vm.name} (${vm.vmid}) on node ${node.node}. Currently single interface is supported.`);
+                continue;
+            }
+
+            const ipv4Address = filteredWithIps[ 0 ][ "ip-addresses" ].filter(ip => ip[ "ip-address-type" ] === "ipv4");
+
+            if (ipv4Address.length === 0) {
+                console.warn(`No valid IPv4 address found for VM ${vm.name} (${vm.vmid}) on node ${node.node}.`);
+                continue;
+            }
+
+            if (ipv4Address.length > 1) {
+                console.warn(`Multiple valid IPv4 addresses found for VM ${vm.name} (${vm.vmid}) on node ${node.node}. Currently single IPv4 address is supported.`);
+                continue;
+            }
+
+            return ipv4Address[ 0 ][ "ip-address" ];
+        }
+    }
+    throw new Error(`Node with hostname ${hostname} not found or does not have a valid IPv4 address.`);
+}
 
 export async function fetchNodes(): Promise<CachedNode[]> {
     const cachedNodes: CachedNode[] = [];

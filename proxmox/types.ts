@@ -1,3 +1,7 @@
+export enum NodeIPFetchingStrategy {
+    QemuGuestAgentSingleIPv4 = "QemuGuestAgentSingleIPv4",
+}
+
 export type NodeSizes = 'small' | 'medium' | 'large' | 'xlarge';
 
 export type NodeSize = {
@@ -53,4 +57,16 @@ export type PVEInstance = {
     cpus: number;
     maxmem: number;
     tags: string;
+};
+
+export type PVEQemuNetworkInterface = {
+    result: {
+        name: string;
+        'hardware-address': string;
+        'ip-addresses': {
+            "ip-address-type": "ipv4" | "ipv6";
+            prefix: number;
+            "ip-address": string;
+        }[];
+    }[];
 };
